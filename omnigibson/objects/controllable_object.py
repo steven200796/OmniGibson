@@ -432,7 +432,11 @@ class ControllableObject(BaseObject):
             elif ctrl_type == ControlType.VELOCITY:
                 joint.set_vel(ctrl, normalized=norm, target=True)
             elif ctrl_type == ControlType.POSITION:
-                joint.set_pos(ctrl, normalized=norm, target=True)
+                if "_rx" in joint.name or "_ry" in joint.name or "_rz" in joint.name:
+                    joint.set_pos(ctrl, normalized=norm, target=False)
+                else:
+                    joint.set_pos(ctrl, normalized=norm, target=True)
+
             else:
                 raise ValueError("Invalid control type specified: {}".format(ctrl_type))
 

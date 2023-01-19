@@ -1,6 +1,6 @@
 import logging
 import os
-
+import sys
 import yaml
 import builtins
 
@@ -21,6 +21,11 @@ logging.getLogger().setLevel(logging.INFO)
 
 with open(os.path.join(os.path.dirname(os.path.realpath(__file__)), "global_config.yaml")) as f:
     global_config = yaml.load(f, Loader=yaml.FullLoader)
+for item in global_config:
+    if sys.platform == "linux":
+        global_config[item] = global_config[item].replace('\\', '/')
+    elif sys.platform == "win32":
+        global_config[item] = global_config[item].replace('/', '\\')
 
 # can override assets_path and dataset_path from environment variable
 if "OMNIGIBSON_ASSETS_PATH" in os.environ:

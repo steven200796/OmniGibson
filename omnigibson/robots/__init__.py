@@ -1,4 +1,6 @@
 from omnigibson.robots.active_camera_robot import ActiveCameraRobot
+# from omnigibson.robots.ant import Ant
+from omnigibson.robots.behavior_robot import BehaviorRobot
 from omnigibson.robots.freight import Freight
 from omnigibson.robots.husky import Husky
 from omnigibson.robots.locobot import Locobot

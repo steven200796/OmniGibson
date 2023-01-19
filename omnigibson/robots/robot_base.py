@@ -169,7 +169,7 @@ class BaseRobot(USDObject, ControllableObject, GymObservable):
                     sensor = create_sensor(
                         sensor_type=prim_type,
                         prim_path=str(prim.GetPrimPath()),
-                        name=f"{self.name}:{link_name}_{prim_type}_sensor",
+                        name=f"{self.name}:{link_name}_{str(prim.GetPrimPath()).split('/')[-1]}",
                         modalities=modalities,
                     )
                     self._sensors[sensor.name] = sensor

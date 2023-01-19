@@ -736,7 +736,8 @@ class ManipulationRobot(BaseRobot):
             candidates_set, robot_contact_links = self._find_gripper_contacts(arm=arm)
             # If we're using assisted grasping, we further filter candidates via ray-casting
             if self.grasping_mode == "assisted":
-                raise NotImplementedError("Not assisted grasp avaialble yet in OmnOmniGibson!")
+                candidates_set_raycast = self._find_gripper_raycast_collisions(arm=arm)
+                candidates_set = candidates_set.intersection(candidates_set_raycast)
         else:
             raise ValueError("Invalid grasping mode for calculating in hand object: {}".format(self.grasping_mode))
 
