@@ -19,6 +19,9 @@ gm.HEADLESS = (os.getenv("OMNIGIBSON_HEADLESS", 'False').lower() in ('true', '1'
 # Whether to use extra settings (verboseness, extra GUI features) for debugging
 gm.DEBUG = True
 
+# whether to use VR
+gm.USE_VR = True
+
 # Whether to print out disclaimers (i.e.: known failure cases resulting from Omniverse's current bugs / limitations)
 gm.SHOW_DISCLAIMERS = True
 

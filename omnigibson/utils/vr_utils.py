@@ -7,15 +7,6 @@ import numpy as np
 from omnigibson.utils.config_utils import dump_config, parse_config, parse_str_config
 
 
-def normalizeListVec(v):
-    """Normalizes a vector list."""
-    length = v[0] ** 2 + v[1] ** 2 + v[2] ** 2
-    if length <= 0:
-        length = 1
-    v = [val / np.sqrt(length) for val in v]
-    return v
-
-
 # List of all VR button idx/press combos, which will be used to form a compact binary representation
 # These are taken from the openvr.h header file
 VR_BUTTON_COMBOS = [
@@ -145,17 +136,14 @@ class VrStaticImageOverlay(VrOverlayBase):
 
 class VrSettings(object):
     """
-    Class containing VR settings pertaining to both the VR renderer
+    Class containing VR settings pertaining to both the VRSys
     and VR functionality in the simulator/of VR objects
     """
 
-    def __init__(self, use_vr=False, config_str=None):
+    def __init__(self):
         """
         Initializes VR settings.
         """
-        self.config_str = config_str
-        # VR is disabled by default
-        self.use_vr = use_vr
         # Simulation is reset at start by default
         self.reset_sim = True
         # No frame save path by default
@@ -163,17 +151,13 @@ class VrSettings(object):
 
         cur_folder = os.path.abspath(os.path.dirname(__file__))
         self.vr_config_path = os.path.join(cur_folder, "..", "vr_config.yaml")
-        self.load_vr_config(config_str)
+        self.load_vr_config()
 
-    def load_vr_config(self, config_str=None):
+    def load_vr_config(self):
         """
         Loads in VR config and sets all settings accordingly.
-        :param config_str: string to override current vr config - used in data replay
         """
-        if config_str:
-            self.vr_config = parse_str_config(config_str)
-        else:
-            self.vr_config = parse_config(self.vr_config_path)
+        self.vr_config = parse_config(self.vr_config_path)
 
         shared_settings = self.vr_config["shared_settings"]
         self.touchpad_movement = shared_settings["touchpad_movement"]
@@ -185,7 +169,7 @@ class VrSettings(object):
         self.hud_width = shared_settings["hud_width"]
         self.hud_pos = shared_settings["hud_pos"]
         self.height_bounds = shared_settings["height_bounds"]
-        self.store_only_first_event_per_button = shared_settings["store_only_first_event_per_button"]
+        self.store_only_first_button_event = shared_settings["store_only_first_button_event"]
         self.use_tracked_body = shared_settings["use_tracked_body"]
         self.torso_tracker_serial = shared_settings["torso_tracker_serial"]
         # Both body-related values need to be set in order to use the torso-tracked body
@@ -202,9 +186,7 @@ class VrSettings(object):
         # Disable waist tracker by default for Oculus
         if self.curr_device == "OCULUS":
             self.torso_tracker_serial = None
-        specific_device_settings = device_settings[self.curr_device]
-        self.eye_tracking = specific_device_settings["eye_tracking"]
-        self.action_button_map = specific_device_settings["action_button_map"]
+        self.action_button_map = device_settings[self.curr_device]["action_button_map"]
         self.gen_button_action_map()
 
     def dump_vr_settings(self):
@@ -221,18 +203,6 @@ class VrSettings(object):
         self.button_action_map = {}
         for k, v in self.action_button_map.items():
             self.button_action_map[tuple(v)] = k
-
-    def turn_on_companion_window(self):
-        """
-        Turns on companion window for VR mode.
-        """
-        self.use_companion_window = True
-
-    def set_frame_save_path(self, frame_save_path):
-        """
-        :param frame_save_path: sets path to save frames (used in action replay)
-        """
-        self.frame_save_path = frame_save_path
 
 
 # ----- Utility classes ------
@@ -341,61 +311,6 @@ class VrData(object):
             print("{}: {}".format(k, v))
 
 
-class VrTimer(object):
-    """
-    Class that can be used to time events - eg. in speed benchmarks.
-    """
-
-    def __init__(self):
-        """
-        Initializes timer
-        """
-        self.refresh_timer()
-
-    def start_timer(self):
-        """
-        Starts timing running
-        """
-        self.timer_start = time.perf_counter()
-        self.timer_stop = None
-
-    def get_timer_val(self):
-        """
-        Gets timer value. If not start value, return 0.
-        If we haven't stopped (ie. self.time_stop is None),
-        return time since start. If we have stopped,
-        return duration of timer interval.
-        """
-        if not self.timer_start:
-            return 0.0
-        if not self.timer_stop:
-            return time.perf_counter() - self.timer_start + self.total_time
-        else:
-            return self.total_time
-
-    def is_timer_running(self):
-        """
-        Returns state of timer - either running or not
-        """
-        return self.timer_start is not None and self.timer_stop is None
-
-    def stop_timer(self):
-        """
-        Stop timer
-        """
-        self.timer_stop = time.perf_counter()
-        self.total_time += self.timer_stop - self.timer_start
-
-    def refresh_timer(self):
-        """
-        Refreshes timer
-        """
-        # Stores total time so far - necessary to resume timing after stopping
-        self.total_time = 0.0
-        self.timer_start = None
-        self.timer_stop = None
-
-
 # ----- Utility functions ------
 
 
@@ -464,28 +379,11 @@ def convert_binary_to_button_data(bin_events):
     return button_press_data
 
 
-def move_player(s, touch_x, touch_y, movement_speed, relative_device):
-    """Moves the VR player. Takes in the simulator,
-    information from the right touchpad, player movement speed and the device relative to which
-    we would like to move."""
-    s.set_vr_offset(calc_offset(s, touch_x, touch_y, movement_speed, relative_device))
-
-
-def calc_offset(s, touch_x, touch_y, movement_speed, relative_device):
-    curr_offset = s.get_vr_offset()
-    right, _, forward = s.get_device_coordinate_system(relative_device)
-    return translate_vr_position_by_vecs(touch_x, touch_y, right, forward, curr_offset, movement_speed)
-
-
-def get_normalized_translation_vec(right_frac, forward_frac, right, forward):
-    """Generates a normalized translation vector that is a linear combination of forward and right."""
-    vr_offset_vec = [right[i] * right_frac + forward[i] * forward_frac for i in range(3)]
+def calc_offset(s, curr_offset, touch_x, touch_y, movement_speed, relative_device):
+    right, _, forward = s.vr_sys.getDeviceCoordinateSystem(relative_device)
+    vr_offset_vec = np.array([right[i] * touch_x + forward[i] * touch_y for i in range(3)])
     vr_offset_vec[2] = 0
-    return normalizeListVec(vr_offset_vec)
-
-
-def translate_vr_position_by_vecs(right_frac, forward_frac, right, forward, curr_offset, movement_speed):
-    """Generates a normalized translation vector that is a linear combination of forward and right, the"""
-    """direction vectors of the chosen VR device (HMD/controller), and adds this vector to the current offset."""
-    vr_offset_vec = get_normalized_translation_vec(right_frac, forward_frac, right, forward)
+    length = np.linalg.norm(vr_offset_vec)
+    if length != 0:
+        vr_offset_vec /= length
     return [curr_offset[i] + vr_offset_vec[i] * movement_speed for i in range(3)]

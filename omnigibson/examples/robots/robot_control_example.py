@@ -116,7 +116,8 @@ def main(random_selection=False, headless=False, short_exec=False):
 
     # Reset environment
     env.reset()
-
+    robot.test()
+    robot.set_position_orientation([0, 0, 1])
     # Create teleop controller
     action_generator = KeyboardRobotController(robot=robot)
 
@@ -128,13 +129,20 @@ def main(random_selection=False, headless=False, short_exec=False):
     print("Running demo.")
     print("Press ESC to quit")
 
+    # from IPython import embed
+    # print("debug")
+    # embed()
+
     # Loop control until user quits
     max_steps = -1 if not short_exec else 100
     step = 0
     while step != max_steps:
         action = action_generator.get_random_action() if control_mode == "random" else action_generator.get_teleop_action()
-        for _ in range(10):
-            env.step(action=action)
+        for _ in range(1):
+            if og.sim.is_playing():
+                env.step(action)
+            else:
+                og.sim.step()
             step += 1
 
     # Always shut down the environment cleanly at the end

@@ -118,8 +118,12 @@ def create_app():
 
 def create_sim():
     global sim
-    from omnigibson.simulator import Simulator
-    sim = Simulator()
+    if gm.USE_VR:
+        from omnigibson.simulator_vr import SimulatorVR
+        sim = SimulatorVR()
+    else:
+        from omnigibson.simulator import Simulator
+        sim = Simulator()
     return sim
 
 

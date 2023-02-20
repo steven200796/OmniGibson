@@ -37,36 +37,28 @@ class CMakeBuild(build_ext):
             self.build_extension(ext)
 
         if platform.system() == "Windows":
-            mesh_renderer_dir = os.path.join(here, "omnigibson", "render", "mesh_renderer")
-            release_dir = os.path.join(mesh_renderer_dir, "Release")
+            vr_dir = os.path.join(here, "omnigibson", "vr")
+            release_dir = os.path.join(vr_dir, "Release")
             for f in os.listdir(release_dir):
-                shutil.copy(os.path.join(release_dir, f), mesh_renderer_dir)
+                shutil.copy(os.path.join(release_dir, f), vr_dir)
 
             shutil.rmtree(release_dir)
-            vr_dll = os.path.join(here, "omnigibson", "render", "openvr", "bin", "win64", "openvr_api.dll")
-            sr_ani_dir = os.path.join(here, "omnigibson", "render", "sranipal", "bin")
-            shutil.copy(vr_dll, mesh_renderer_dir)
+            vr_dll = os.path.join(here, "omnigibson", "vr", "deps", "openvr", "bin", "win64", "openvr_api.dll")
+            sr_ani_dir = os.path.join(here, "omnigibson", "vr", "deps", "sranipal", "bin")
+            shutil.copy(vr_dll, vr_dir)
 
             for f in os.listdir(sr_ani_dir):
                 if f.endswith("dll"):
-                    shutil.copy(os.path.join(sr_ani_dir, f), mesh_renderer_dir)
+                    shutil.copy(os.path.join(sr_ani_dir, f), vr_dir)
 
 
     def build_extension(self, ext):
         extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.name)))
         cmake_args = [
-            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + os.path.join(extdir, "omnigibson", "render", "mesh_renderer"),
-            "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=" + os.path.join(extdir, "omnigibson", "render", "mesh_renderer", "build"),
+            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + os.path.join(extdir, "omnigibson", "vr"),
+            "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=" + os.path.join(extdir, "omnigibson", "vr", "build"),
             "-DPYTHON_EXECUTABLE=" + sys.executable,
         ]
-
-        if use_clang:
-            cmake_args += ["-DCMAKE_C_COMPILER=/usr/bin/clang", "-DCMAKE_CXX_COMPILER=/usr/bin/clang++"]
-
-        if platform.system() == "Darwin":
-            cmake_args += ["-DMAC_PLATFORM=TRUE"]
-        else:
-            cmake_args += ["-DMAC_PLATFORM=FALSE"]
 
         if os.getenv("USE_VR"):
             cmake_args += ["-DUSE_VR=TRUE"]
@@ -124,10 +116,10 @@ setup(
         "opencv-python",
         "nest_asyncio",
     ],
-    ext_modules=[CMakeExtension("MeshRendererContext", sourcedir="omnigibson/render")],
+    ext_modules=[CMakeExtension("VRSys", sourcedir="omnigibson/vr")],
     cmdclass=dict(build_ext=CMakeBuild),
     tests_require=[],
     python_requires=">=3",
-    package_data={"": ["omnigibson/global_config.yaml", "omnigibson/render/mesh_renderer/shaders/*"]},
+    package_data={"": ["omnigibson/global_config.yaml"]},
     include_package_data=True,
 )  # yapf: disable

@@ -2,13 +2,12 @@ import time
 import numpy as np
 
 from time import sleep
-from typing import List
+from typing import List, Optional
 from OpenGL.GL import *
-from omnigibson.render.mesh_renderer.mesh_renderer_settings import MeshRendererSettings
 from omnigibson.utils.vr_utils import VrSettings, VrHUDOverlay, VrStaticImageOverlay
-from omnigibson.render.mesh_renderer import VRRendererContext
-from omnigibson.robots.BR33 import HAND_BASE_ROTS
+from omnigibson.vr.VRSys import VRSys
 from omnigibson.robots.manipulation_robot import IsGraspingState
+from omnigibson.robots.behavior_robot import HAND_BASE_ROTS
 from omnigibson.simulator import Simulator
 from omnigibson.utils.vr_utils import VR_CONTROLLERS, VR_DEVICES, VrData, calc_offset
 import omnigibson.utils.transform_utils as T
@@ -26,11 +25,9 @@ class SimulatorVR(Simulator):
             physics_dt=1 / 120.0,
             rendering_dt=1 / 60.0,
             stage_units_in_meters: float = 1.0,
-            viewer_width=1280,
-            viewer_height=720,
-            vertical_fov=90,
+            viewer_width=1600,
+            viewer_height=1440,
             device_idx=None,
-            apply_transitions=False
     ):
         """
         :param gravity: gravity on z direction.
@@ -48,10 +45,9 @@ class SimulatorVR(Simulator):
         :param vr_settings: settings to use for VR in simulator and MeshRendererVR
         """
         # Starting position for the VR (default set to None if no starting position is specified by the user)
-        self.vr_settings = VrSettings(use_vr=True)
+        self.vr_settings = VrSettings()
         self.vr_overlay_initialized = False
-        self.vr_start_pos = None
-        self.max_haptic_duration = 4000
+        self.vr_start_position = None
         self._vr_attachment_button_press_timestamp = float("inf")
 
         # Duration of a vsync frame - assumes 90Hz refresh rate
@@ -73,9 +69,7 @@ class SimulatorVR(Simulator):
             stage_units_in_meters,
             viewer_width,
             viewer_height,
-            vertical_fov,
             device_idx,
-            apply_transitions
         )
 
         # Get expected number of vsync frames per iGibson frame Note: currently assumes a 90Hz VR system
@@ -86,38 +80,33 @@ class SimulatorVR(Simulator):
         self.non_block_frame_time = (self.vsync_frame_num - 1) * self.vsync_frame_dur + (
             5e-3 if self.vr_settings.curr_device == "OCULUS" else 10e-3
         )
-
-        self.rendering_settings = MeshRendererSettings()
         self.rendering_dt = rendering_dt
         self.main_vr_robot = None
         self.vr_hud = None
         self.vr_text_left_id, self.vr_text_right_id = None, None
         self.vr_sys = None
 
+    def __del__(self):
+        if self.vr_sys:
+            self.vr_sys.release()
+        return super().__del__()
+
     def initialize_vr(self):
-        self.vr_sys = VRRendererContext.VRRendererContext(
-            self.viewer_width,
-            self.viewer_height,
-            int(self.rendering_settings.glfw_gl_version[0]),
-            int(self.rendering_settings.glfw_gl_version[1]),
-            self.rendering_settings.show_glfw_window,
-            self.rendering_settings.fullscreen,
-        )
-        self.vr_sys.init()
-        self.vr_sys.initVR(self.vr_sys.hasEyeTrackingSupport())
+        self.vr_sys = VRSys()
+        self.vr_sys.init(self.vr_sys.hasEyeTrackingSupport())
         self.initialize_vr_render()
 
     def add_vr_overlay_text(
-            self,
-            text_data="PLACEHOLDER: PLEASE REPLACE!",
-            font_name="OpenSans",
-            font_style="Regular",
-            font_size=48,
-            color=[0, 0, 0],
-            pos=[20, 80],
-            size=[70, 80],
-            scale=1.0,
-            background_color=[1, 1, 1, 0.8],
+        self,
+        text_data="PLACEHOLDER: PLEASE REPLACE!",
+        font_name="OpenSans",
+        font_style="Regular",
+        font_size=48,
+        color=[0, 0, 0],
+        pos=[20, 80],
+        size=[70, 80],
+        scale=1.0,
+        background_color=[1, 1, 1, 0.8],
     ):
         """
         Creates Text for use in a VR overlay. Returns the text object to the caller,
@@ -191,17 +180,15 @@ class SimulatorVR(Simulator):
     def step_vr_system(self):
         # Update VR compositor and VR data
         vr_system_start = time.perf_counter()
-        # First sync VR compositor - this is where Oculus blocks (as opposed to Vive, which blocks in update_vr_data)
-        self.sync_vr_compositor()
         # Note: this should only be called once per frame - use get_vr_events to read the event data list in
         # subsequent read operations
         self.poll_vr_events()
-        # This is necessary to fix the eye tracking value for the current frame, since it is multi-threaded
-        self.fix_eye_tracking_value()
+        # This is necessary to fix the eye tracking data for the current frame, since it is multi-threaded
+        self.fix_eye_tracking_data()
         # Move user to their starting location
         self.perform_vr_start_pos_move()
         # Update VR data and wait until 3ms before the next vsync
-        self.vr_sys.updateVRData()
+        self.vr_sys.pollVRPosesAndStates()
         # Update VR system data - eg. offsets, haptics, etc.
         self.vr_system_update()
         vr_system_dur = time.perf_counter() - vr_system_start
@@ -225,17 +212,17 @@ class SimulatorVR(Simulator):
             outside_step_dur = time.perf_counter() - self.frame_end_time
         # Simulate Physics in OmniGibson
         omni_step_start_time = time.perf_counter()
-        ps, nps = super().step()
+        super().step(render, force_playing)
         # update collision status of BR hand
         if self.main_vr_robot:
             self.main_vr_robot.update_hand_contact_info()
-        physics_dur = time.perf_counter() - omni_step_start_time
+        omni_dur = time.perf_counter() - omni_step_start_time
         # render to headset
         render_start_time = time.perf_counter()
         self.render_vr()
         render_dur = time.perf_counter() - render_start_time
         # Sleep until last possible Vsync
-        pre_sleep_dur = outside_step_dur + physics_dur + render_dur
+        pre_sleep_dur = outside_step_dur + omni_dur + render_dur
         sleep_start_time = time.perf_counter()
         if pre_sleep_dur < self.non_block_frame_time:
             sleep(self.non_block_frame_time - pre_sleep_dur)
@@ -247,15 +234,14 @@ class SimulatorVR(Simulator):
         frame_dur = max(1e-3, pre_sleep_dur + sleep_dur + vr_system_dur)
 
         # Set variables for data saving and replay
-        self.last_physics_step = physics_dur
+        self.last_physics_step = omni_dur
         self.last_render_timestep = render_dur
         self.last_frame_dur = frame_dur
 
         if print_stats:
             print("Frame number {} statistics (ms)".format(self.frame_count))
             print("Total out-of-step duration: {}".format(outside_step_dur * 1000))
-            print("Total physics step duration: {}".format(ps * 1000))
-            print("Total non physics step duration: {}".format(nps * 1000))
+            print("Total omni duration: {}".format(omni_dur * 1000))
             print("Total render duration: {}".format(render_dur * 1000))
             print("Total sleep duration: {}".format(sleep_dur * 1000))
             print("Total VR system duration: {}".format(vr_system_dur * 1000))
@@ -271,8 +257,7 @@ class SimulatorVR(Simulator):
         """
         if self.main_vr_robot:
             self.main_vr_robot.update_vr_render()
-        self.vr_sys.postRenderVRForEye("left", self.vr_text_left_id)
-        self.vr_sys.postRenderVRForEye("right", self.vr_text_right_id)
+        self.vr_sys.render(self.vr_text_left_id, self.vr_text_right_id)
 
     def vr_system_update(self):
         """
@@ -282,49 +267,35 @@ class SimulatorVR(Simulator):
         # Update VR offset using appropriate controller
         if self.vr_settings.touchpad_movement:
             vr_offset_device = "{}_controller".format(self.vr_settings.movement_controller)
-            is_valid, _, _ = self.get_data_for_vr_device(vr_offset_device)
+            curr_offset = self.vr_sys.getVROffset()
+            is_valid, _, touch_x, touch_y, _ = self.vr_sys.getControllerButtonData(vr_offset_device)
             if is_valid:
-                _, touch_x, touch_y, _ = self.get_button_data_for_controller(vr_offset_device)
-                new_offset = calc_offset(
-                    self, touch_x, touch_y, self.vr_settings.movement_speed, self.vr_settings.relative_movement_device
+                curr_offset = calc_offset(
+                    self, curr_offset, touch_x, touch_y, self.vr_settings.movement_speed, self.vr_settings.relative_movement_device
                 )
-                self.set_vr_offset(new_offset)
-
-        # Adjust user height based on y-axis (vertical direction) touchpad input
-        vr_height_device = "left_controller" if self.vr_settings.movement_controller == "right" else "right_controller"
-        is_height_valid, _, _ = self.get_data_for_vr_device(vr_height_device)
-        if is_height_valid:
-            curr_offset = self.get_vr_offset()
-            hmd_height = self.get_hmd_world_pos()[2]
-            _, _, height_y, _ = self.get_button_data_for_controller(vr_height_device)
-            if height_y < -0.7:
-                vr_z_offset = -0.01
-                if hmd_height + curr_offset[2] + vr_z_offset >= self.vr_settings.height_bounds[0]:
-                    self.set_vr_offset([curr_offset[0], curr_offset[1], curr_offset[2] + vr_z_offset])
-            elif height_y > 0.7:
-                vr_z_offset = 0.01
-                if hmd_height + curr_offset[2] + vr_z_offset <= self.vr_settings.height_bounds[1]:
-                    self.set_vr_offset([curr_offset[0], curr_offset[1], curr_offset[2] + vr_z_offset])
-        # Update haptics for body and hands
+            # Adjust user height based on y-axis (vertical direction) touchpad input
+            vr_height_device = "left_controller" if self.vr_settings.movement_controller == "right" else "right_controller"
+            is_valid, _, _, height_y, _ = self.vr_sys.getControllerButtonData(vr_height_device)
+            if is_valid:
+                hmd_height = self.vr_sys.getDevicePose("hmd")[-1][2]
+                if height_y < -0.7:
+                    curr_offset[2] = max(curr_offset[2] - 0.01, self.vr_settings.height_bounds[0] - hmd_height)
+                elif height_y > 0.7:
+                    curr_offset[2] = min(curr_offset[2] + 0.01, self.vr_settings.height_bounds[1] - hmd_height)
+            self.vr_sys.setVROffset(*curr_offset)
+        # Update haptics for controllers
         if self.main_vr_robot:
-            # Check for body haptics
-            if self.main_vr_robot.part_is_in_contact["body"]:
-                for controller in ["left_controller", "right_controller"]:
-                    is_valid, _, _ = self.get_data_for_vr_device(controller)
-                    if is_valid:
-                        # Use 90% strength for body to warn user of collision with wall
-                        self.trigger_haptic_pulse(controller, 0.9)
-
-            # Check for hand haptics
-            for hand_device, hand_name in [("left_controller", "lh"), ("right_controller", "rh")]:
-                is_valid, _, _ = self.get_data_for_vr_device(hand_device)
+            is_body_in_collision = self.main_vr_robot.part_is_in_contact["body"]
+            for controller, hand_name in [("left_controller", "lh"), ("right_controller", "rh")]:
+                is_valid, _, _, _ = self.vr_sys.getDevicePose(controller)
                 if is_valid:
                     if (
                         self.main_vr_robot.part_is_in_contact[hand_name]
                         or self.main_vr_robot.is_grasping(hand_name) == IsGraspingState.TRUE
                     ):
-                        # Only use 30% strength for normal collisions, to help add realism to the experience
-                        self.trigger_haptic_pulse(hand_device, 0.3)
+                        self.vr_sys.triggerHapticPulse(controller, 0.3)
+                    elif is_body_in_collision:
+                        self.vr_sys.triggerHapticPulse(controller, 0.9)
 
     def register_main_vr_robot(self, vr_robot):
         """
@@ -339,63 +310,69 @@ class SimulatorVR(Simulator):
         """
         v = dict()
         for device in VR_DEVICES:
-            is_valid, trans, rot = self.get_data_for_vr_device(device)
+            is_valid, trans, rot, _ = self.vr_sys.getDevicePose(device)
             device_data = [is_valid, trans.tolist(), rot.tolist()]
-            device_data.extend(self.get_device_coordinate_system(device))
+            device_data.extend(self.vr_sys.getDeviceCoordinateSystem(device))
             v[device] = device_data
             if device in VR_CONTROLLERS:
-                v["{}_button".format(device)] = self.get_button_data_for_controller(device)
+                v[f"{device}_button"] = self.vr_sys.getControllerButtonData(device)
 
-        # Store final rotations of hands, with model rotation applied
         for hand in ["right", "left"]:
             # Base rotation quaternion
             base_rot = HAND_BASE_ROTS[hand]
             # Raw rotation of controller
-            controller_rot = v["{}_controller".format(hand)][2]
+            if v[f"{hand}_controller"][0]:
+                controller_rot = v[f"{hand}_controller"][2]
+            else:
+                controller_rot = [0, 0, 0, 1]
             # Use dummy translation to calculation final rotation
             final_rot = T.pose_transform([0, 0, 0], controller_rot, [0, 0, 0], base_rot)[1]
-            v["{}_controller".format(hand)].append(final_rot)
+            v[f"{hand}_controller"].append(final_rot)
 
-        is_valid, torso_trans, torso_rot = self.get_data_for_vr_tracker(self.vr_settings.torso_tracker_serial)
-        v["torso_tracker"] = [is_valid, torso_trans, torso_rot]
-        v["eye_data"] = self.get_eye_tracking_data()
+        is_valid, torso_trans, torso_rot, _ = self.vr_sys.getDevicePose(self.vr_settings.torso_tracker_serial)
+        v["torso_tracker"] = [is_valid, torso_trans.tolist(), torso_rot.tolist()]
+        v["eye_data"] = self.eye_tracking_data
         v["event_data"] = self.get_vr_events()
         reset_actions = []
         for controller in VR_CONTROLLERS:
             reset_actions.append(self.query_vr_event(controller, "reset_agent"))
         v["reset_actions"] = reset_actions
-        v["vr_positions"] = [self.get_vr_pos().tolist(), list(self.get_vr_offset())]
         return VrData(v)
-
-    def sync_vr_compositor(self):
-        """
-        Sync VR compositor.
-        """
-        self.vr_sys.postRenderVR(True)
 
     def perform_vr_start_pos_move(self):
         """
         Sets the VR position on the first step iteration where the hmd tracking is valid. Not to be confused
-        with self.set_vr_start_pos, which simply records the desired start position before the simulator starts running.
+        with self.set_vr_start_position, which simply records the desired start position before the simulator starts running.
         """
         # Update VR start position if it is not None and the hmd is valid
         # This will keep checking until we can successfully set the start position
-        if self.vr_start_pos:
-            hmd_is_valid, _, _, _ = self.vr_sys.getDataForVRDevice("hmd")
+        if self.vr_start_position:
+            hmd_is_valid, hmd_position, _, _ = self.vr_sys.getDevicePose("hmd")
             if hmd_is_valid:
-                offset_to_start = np.array(self.vr_start_pos) - self.get_hmd_world_pos()
-                if self.vr_height_offset is not None:
-                    offset_to_start[2] = self.vr_height_offset
-                self.set_vr_offset(offset_to_start)
-                self.vr_start_pos = None
+                offset_to_start = np.array(self.vr_start_position) - hmd_position
+                if self.vr_start_height_offset is not None:
+                    offset_to_start[2] = self.vr_start_height_offset
+                self.vr_sys.setVROffset(*offset_to_start)
+                self.vr_start_position = None
 
-    def fix_eye_tracking_value(self):
+    def fix_eye_tracking_data(self):
         """
-        Calculates and fixes eye tracking data to its value during step(). This is necessary, since multiple
+        Calculates and fixes eye tracking data to its value during step(). 
+        This is necessary, since multiple
         calls to get eye tracking data return different results, due to the SRAnipal multithreaded loop that
         runs in parallel to the iGibson main thread
         """
         self.eye_tracking_data = self.vr_sys.getEyeTrackingData()
+        # fix origin and direction 
+        if not self.eye_tracking_data[0]: # combined data invalid
+            self.eye_tracking_data[3] = [-1, -1, -1]
+            self.eye_tracking_data[4] = [-1, -1, -1]
+        if not self.eye_tracking_data[1]: # left data invalid
+            self.eye_tracking_data[5] = [-1, -1, -1]
+            self.eye_tracking_data[6] = [-1, -1, -1]
+        if not self.eye_tracking_data[2]: # right data invalid
+            self.eye_tracking_data[7] = [-1, -1, -1]
+            self.eye_tracking_data[8] = [-1, -1, -1]
 
     def poll_vr_events(self):
         """
@@ -408,7 +385,7 @@ class SimulatorVR(Simulator):
 
         self.vr_event_data = self.vr_sys.pollVREvents()
         # Enforce store_first_button_press_per_frame option, if user has enabled it
-        if self.vr_settings.store_only_first_event_per_button:
+        if self.vr_settings.store_only_first_button_event:
             temp_event_data = []
             # Make sure we only store the first (button, press) combo of each type
             event_set = set()
@@ -421,10 +398,8 @@ class SimulatorVR(Simulator):
             self.vr_event_data = temp_event_data[:]
 
             if len(self.vr_event_data) != 0:
-                for event in self.vr_event_data:
+                for ev_data in self.vr_event_data:
                     controller, button_idx, pressed = ev_data
-                    pressed_str = "pressed" if pressed else "unpressed"
-                    print("Controller %d button %d %s" % (controller, button_idx, pressed_str))
 
         return self.vr_event_data
 
@@ -434,16 +409,18 @@ class SimulatorVR(Simulator):
         """
         return self.vr_event_data
 
-    def query_vr_event(self, controller, action):
+    def query_vr_event(self, controller: str, action: str) -> bool:
         """
         Queries system for a VR event, and returns true if that event happened this frame
-        :param controller: device to query for - can be left_controller or right_controller
-        :param action: an action name listed in "action_button_map" dictionary for the current device in the vr_config.yml
+        Args:
+            controller (str): device to query for - either left_controller or right_controller
+            action (str): an action name listed in "action_button_map" dictionary for the current device in the vr_config.yml
+        
         """
         # Return false if any of input parameters are invalid
         if (
-                controller not in ["left_controller", "right_controller"]
-                or action not in self.vr_settings.action_button_map.keys()
+            controller not in ["left_controller", "right_controller"]
+            or action not in self.vr_settings.action_button_map.keys()
         ):
             return False
 
@@ -453,76 +430,10 @@ class SimulatorVR(Simulator):
         for ev_data in self.vr_event_data:
             if controller_id == ev_data[0] and button_idx == ev_data[1] and press_id == ev_data[2]:
                 return True
-
         # Return false if event was not found this frame
         return False
 
-    def get_data_for_vr_device(self, device_name: str) -> List:
-        """
-        Call this after step - returns all VR device data for a specific device
-        Returns is_valid (indicating validity of data), translation and rotation in Gibson world space
-        Args:
-             device_name (str): one of hmd, left_controller or right_controller
-        Returns:
-            List[bool, List[float], List[float]]: isvalid, translation and rotation
-        """
-
-        # Use fourth variable in list to get actual hmd position in space
-        is_valid, translation, rotation, _ = self.vr_sys.getDataForVRDevice(device_name)
-        if not is_valid:
-            translation = np.array([0, 0, 0])
-            rotation = np.array([0, 0, 0, 1])
-        return [is_valid, translation, rotation]
-
-    def get_data_for_vr_tracker(self, tracker_serial_number: str) -> List:
-        """
-        Returns the data for a tracker with a specific serial number. See vr_config.yaml for how to find serial number
-        Args:
-             tracker_serial_number (str): the serial number of the tracker
-        Returns:
-            List[bool, List[float], List[float]]: isvalid, translation and rotation
-        """
-
-        if not tracker_serial_number:
-            return [False, np.zeros(3), np.zeros(4)]
-
-        tracker_data = self.vr_sys.getDataForVRTracker(tracker_serial_number)
-        # Set is_valid to false, and assume the user will check for invalid data
-        if not tracker_data:
-            return [False, np.array([0, 0, 0]), np.array([0, 0, 0, 1])]
-
-        is_valid, translation, rotation = tracker_data
-        return [is_valid, translation, rotation]
-
-    def get_hmd_world_pos(self) -> List[float]:
-        """
-        Get world position of HMD without offset
-        """
-
-        return self.vr_sys.getDataForVRDevice("hmd")[3]
-
-    def get_button_data_for_controller(self, controller_name: str) -> List:
-        """
-        Call this after getDataForVRDevice - returns analog data for a specific controller
-        Returns trigger_fraction, touchpad finger position x, touchpad finger position y
-        Data is only valid if isValid is true from previous call to getDataForVRDevice
-        Trigger data: 1 (closed) <------> 0 (open)
-        Analog data: X: -1 (left) <-----> 1 (right) and Y: -1 (bottom) <------> 1 (top)
-
-        Args:
-             controller_name (str): one of left_controller or right_controller
-        """
-
-        # Test for validity when acquiring button data
-        if self.get_data_for_vr_device(controller_name)[0]:
-            trigger_fraction, touch_x, touch_y, buttons_pressed = self.vr_sys.getButtonDataForController(
-                controller_name
-            )
-        else:
-            trigger_fraction, touch_x, touch_y, buttons_pressed = 0.0, 0.0, 0.0, 0
-        return [trigger_fraction, touch_x, touch_y, buttons_pressed]
-
-    def get_action_button_state(self, controller: str, action, vr_data: VrData) -> bool:
+    def get_action_button_state(self, controller: str, action: str, vr_data: VrData) -> bool:
         """This function can be used to extract the _state_ of a button from the vr_data's buttons_pressed vector.
         If only key press/release events are required, use the event polling mechanism. This function is meant for
         providing access to the continuous pressed/released state of the button.
@@ -545,130 +456,30 @@ class SimulatorVR(Simulator):
         button_idx, _ = self.vr_settings.action_button_map[action]
 
         # Get the bitvector corresponding to the buttons currently pressed on the controller.
-        buttons_pressed = int(vr_data.query("%s_button" % controller)[3])
+        controller_button_data = vr_data.query(f"{controller}_button")
+        buttons_pressed = int(controller_button_data[0] * controller_button_data[4])
 
         # Extract and return the value of the bit corresponding to the button.
         return bool(buttons_pressed & (1 << button_idx))
 
-    def get_scroll_input(self) -> int:
-        """
-        Gets scroll input. This uses the non-movement-controller, and determines whether
-        the user wants to scroll by testing if they have pressed the touchpad, while keeping
-        their finger on the left/right of the pad.
-
-        Return:
-            int: 1 for up, 0 for down, -1 for no scroll
-        """
-        mov_controller = self.vr_settings.movement_controller
-        other_controller = "right" if mov_controller == "left" else "left"
-        other_controller = "{}_controller".format(other_controller)
-        # Data indicating whether user has pressed top or bottom of the touchpad
-        _, touch_x, _ = self.vr_sys.getButtonDataForController(other_controller)
-        # Detect no touch in extreme regions of x axis
-        if 0.7 < touch_x <= 1.0:
-            return 1
-        elif -0.7 > touch_x >= -1.0:
-            return 0
-        else:
-            return -1
-
-    def get_eye_tracking_data(self):
-        """
-        Returns eye tracking data as list of lists. Order: is_valid, gaze origin, gaze direction, gaze point,
-        left pupil diameter, right pupil diameter (both in millimeters)
-        Call after getDataForVRDevice, to guarantee that latest HMD transform has been acquired
-        """
-        is_valid, origin, dir, left_pupil_diameter, right_pupil_diameter = self.eye_tracking_data
-        # Set other values to 0 to avoid very small/large floating point numbers
-        if not is_valid:
-            return [False, [0, 0, 0], [0, 0, 0], 0, 0, [0, 0], [0, 0]]
-        else:
-            return [is_valid, origin, dir, left_pupil_diameter, right_pupil_diameter]
-
-    def set_vr_start_pos(self, start_pos=None, vr_height_offset=None):
+    def set_vr_start_position(self, start_position: Optional[List[float]]=None, vr_start_height_offset: Optional[float]=None):
         """
         Sets the starting position of the VR system in iGibson space
 
         Args:
-            start_pos: position to start VR system at. Default is None
-            vr_height_offset: starting height offset. If None, uses absolute height from start_pos
+            start_position (List[float]): position to start VR system at. Default is None
+            vr_start_height_offset (float): starting height offset. If None, uses absolute height from start_position
         """
 
         # The VR headset will actually be set to this position during the first frame.
         # This is because we need to know where the headset is in space when it is first picked
         # up to set the initial offset correctly.
-        self.vr_start_pos = start_pos
+        self.vr_start_position = start_position
         # This value can be set to specify a height offset instead of an absolute height.
         # We might want to adjust the height of the camera based on the height of the person using VR,
         # but still offset this height. When this option is not None it offsets the height by the amount
         # specified instead of overwriting the VR system height output.
-        self.vr_height_offset = vr_height_offset
-
-    def set_vr_pos(self, pos: List[float], keep_height: bool = False):
-        """
-        Sets the world position of the VR system in iGibson space
-
-        Args:
-            pos (List[float]): position to set VR system to
-            keep_height (bool): whether the current VR height should be kept. Default is False.
-        """
-
-        offset_to_pos = np.array(pos) - self.get_hmd_world_pos()
-        if keep_height:
-            curr_offset_z = self.get_vr_offset()[2]
-            self.set_vr_offset([offset_to_pos[0], offset_to_pos[1], curr_offset_z])
-        else:
-            self.set_vr_offset(offset_to_pos)
-
-    def get_vr_pos(self) -> List[float]:
-        """
-        Gets the world position of the VR system in iGibson space.
-        """
-        return self.get_hmd_world_pos() + np.array(self.get_vr_offset())
-
-    def set_vr_offset(self, pos: List[float]):
-        """
-        Sets the translational offset of the VR system (HMD, left & right controller) from world space coordinates.
-        Can be used for many things, including adjusting height and teleportation-based movement
-        Args:
-             pos (List[float]): a list of three floats corresponding to x, y, z in Gibson coordinate space
-        """
-
-        self.vr_sys.setVROffset(-pos[1], pos[2], -pos[0])
-
-    def get_vr_offset(self) -> List[float]:
-        """
-        Gets the current VR offset vector in list form: x, y, z (in iGibson coordinates)
-        """
-
-        x, y, z = self.vr_sys.getVROffset()
-        return [x, y, z]
-
-    def get_device_coordinate_system(self, device: str):
-        """
-        Gets the direction vectors representing the device's coordinate system in list form: x, y, z (in Gibson coordinates)
-        List contains "right", "up" and "forward" vectors in that order
-        Args:
-            device: one of "hmd", "left_controller" or "right_controller"
-        """
-
-        vec_list = []
-
-        coordinate_sys = self.vr_sys.getDeviceCoordinateSystem(device)
-        for dir_vec in coordinate_sys:
-            vec_list.append(dir_vec)
-
-        return vec_list
-
-    def trigger_haptic_pulse(self, device: str, strength: float):
-        """
-        Triggers a haptic pulse of the specified strength (0 is weakest, 1 is strongest)
-        Args:
-            device (str): device to trigger haptic for - can be any one of [left_controller, right_controller]
-            strength (float): strength of haptic pulse (0 is weakest, 1 is strongest)
-        """
-        assert device in ["left_controller", "right_controller"]
-        self.vr_sys.triggerHapticPulseForDevice(device, int(self.max_haptic_duration * strength))
+        self.vr_start_height_offset = vr_start_height_offset
 
     def initialize_vr_render(self):
         img = np.zeros((4, 4, 4))
