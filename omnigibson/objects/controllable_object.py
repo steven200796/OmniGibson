@@ -433,7 +433,7 @@ class ControllableObject(BaseObject):
                 joint.set_effort(ctrl, normalized=norm)
             elif ctrl_type == ControlType.VELOCITY:
                 joint.set_vel(ctrl, normalized=norm, drive=True)
-            elif ctrl_type == ControlType.POSITION:
+            elif ctrl_type == ControlType.POSITION:            
                 joint.set_pos(ctrl, normalized=norm, drive=True)
             elif ctrl_type == ControlType.NONE:
                 # Do nothing
