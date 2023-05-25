@@ -1,17 +1,23 @@
-name: Build & deploy docs
+name: Benchmark
 
-on:
-  push:
+on: 
+  pull_request:
     branches:
-      - main
+        - og-develop
+
+permissions:
+  # deployments permission to deploy GitHub pages website
+  deployments: write
+  # contents permission to update benchmark contents in gh-pages branch
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
   cancel-in-progress: true
 
 jobs:
-  docs:
-    runs-on: [linux]
+  profiling:
+    runs-on: [self-hosted, linux, gpu]
     container:
       image: stanfordvl/omnigibson-dev:latest
       options: --gpus=all --privileged --user=root
@@ -42,24 +48,24 @@ jobs:
 
       - name: Checkout source
         uses: actions/checkout@v3
-        with:
-          submodules: true
-          path: omnigibson-src
-
-      - name: Install
-        working-directory: omnigibson-src
-        run: pip install -e .
 
       - name: Install dev requirements
-        working-directory: omnigibson-src
         run: pip install -r requirements-dev.txt
 
-      - name: Build docs
-        working-directory: omnigibson-src
-        run: source build_docs.sh
-
-      - name: Deploy to gh-pages
-        uses: peaceiris/actions-gh-pages@v3
+      - name: Install
+        run: pip install -e .
+      
+      - name: Run performance benchmark
+        run: source /isaac-sim/setup_conda_env.sh && bash benchmark.sh
+          
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./omnigibson-src/site
+          tool: 'customSmallerIsBetter'
+          output-file-path: output.json
+          benchmark-data-dir-path: benchmark
+          fail-on-alert: true
+          alert-threshold: '200%'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          comment-on-alert: true
+          auto-push: true
