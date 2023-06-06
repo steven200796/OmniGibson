@@ -13,26 +13,46 @@ from math import ceil
 
 import gym
 import numpy as np
-import pybullet as p
 from scipy.spatial.transform import Rotation
+from pxr import PhysxSchema
 
-from igibson import object_states
-from igibson.action_primitives.action_primitive_set_base import ActionPrimitiveError, BaseActionPrimitiveSet
-from igibson.external.pybullet_tools.utils import set_joint_position
-from igibson.object_states.on_floor import RoomFloor
-from igibson.object_states.utils import get_center_extent, sample_kinematics
-from igibson.objects.articulated_object import URDFObject
-from igibson.objects.object_base import BaseObject
-from igibson.robots import BaseRobot, behavior_robot
-from igibson.robots.behavior_robot import DEFAULT_BODY_OFFSET_FROM_FLOOR, BehaviorRobot
-from igibson.tasks.behavior_task import BehaviorTask
-from igibson.utils.behavior_robot_motion_planning_utils import (
+import omnigibson as og
+from omnigibson import object_states
+from omnigibson.action_primitives.action_primitive_set_base import ActionPrimitiveError, BaseActionPrimitiveSet
+# from igibson.external.pybullet_tools.utils import set_joint_position
+# from igibson.object_states.on_floor import RoomFloor
+# from igibson.object_states.utils import get_center_extent, sample_kinematics
+# from igibson.objects.articulated_object import URDFObject
+from omnigibson.objects.object_base import BaseObject
+# from igibson.robots import BaseRobot, behavior_robot
+from omnigibson.robots import BaseRobot
+# from igibson.robots.behavior_robot import DEFAULT_BODY_OFFSET_FROM_FLOOR, BehaviorRobot
+from omnigibson.tasks.behavior_task import BehaviorTask
+from omnigibson.utils.motion_planning_utils import (
     get_pose3d_hand_collision_fn,
     plan_base_motion_br,
     plan_hand_motion_br,
 )
-from igibson.utils.grasp_planning_utils import get_grasp_poses_for_object, get_grasp_position_for_open
-from igibson.utils.utils import restoreState
+# from igibson.utils.grasp_planning_utils import get_grasp_poses_for_object, get_grasp_position_for_open
+# from igibson.utils.utils import restoreState
+
+import omnigibson.utils.transform_utils as T
+from omnigibson.utils.control_utils import IKSolver
+
+# Fake imports
+p = None
+set_joint_position = None
+RoomFloor = None
+get_center_extent = None
+sample_kinematics = None
+URDFObject = None
+DEFAULT_BODY_OFFSET_FROM_FLOOR = 0
+behavior_robot = None
+BehaviorRobot = None
+get_grasp_poses_for_object = None
+get_grasp_position_for_open = None
+restoreState = None
+
 
 MAX_STEPS_FOR_HAND_MOVE = 100
 MAX_STEPS_FOR_HAND_MOVE_WHEN_OPENING = 30
@@ -51,7 +71,8 @@ JOINT_CHECKING_RESOLUTION = np.pi / 18
 
 GRASP_APPROACH_DISTANCE = 0.2
 OPEN_GRASP_APPROACH_DISTANCE = 0.2
-HAND_DISTANCE_THRESHOLD = 0.9 * behavior_robot.HAND_DISTANCE_THRESHOLD
+# HAND_DISTANCE_THRESHOLD = 0.9 * behavior_robot.HAND_DISTANCE_THRESHOLD
+HAND_DISTANCE_THRESHOLD = 0.9
 
 ACTIVITY_RELEVANT_OBJECTS_ONLY = False
 
@@ -81,27 +102,18 @@ def is_close(start_pose, end_pose, angle_threshold, dist_threshold):
         "Position difference to target: %s, Rotation difference: %s", np.linalg.norm(diff_pos), diff_rot.magnitude()
     )
 
-    return diff_rot.magnitude() < angle_threshold and np.linalg.norm(diff_pos) < dist_threshold
+    return diff_rot.magnitude() < angle_threshold, np.linalg.norm(diff_pos) < dist_threshold
 
 
-def pose_to_command(robot, joint_link, pose_in_body):
-    shoulder_to_body = robot.links[joint_link].get_local_position_orientation()
-    body_to_shoulder = p.invertTransform(*shoulder_to_body)
-    pose_in_shoulder = p.multiplyTransforms(*body_to_shoulder, *pose_in_body)
-
-    # Convert pos/quat to [x, y, z, rx, ry, rz]
-    return np.concatenate([pose_in_shoulder[0], p.getEulerFromQuaternion(pose_in_shoulder[1])])
-
-
-def convert_behavior_robot_part_pose_to_action(
-    robot: BehaviorRobot, body_target_pose=None, hand_target_pose=None, reset_others=True, low_precision=False
+def convert_robot_part_pose_to_action(
+    robot, body_target_pose=None, hand_target_pose=None, reset_others=True, low_precision=False
 ):
     assert body_target_pose is not None or hand_target_pose is not None
 
     # Compute the body information from the current frame.
-    body = robot.base_link
+    body = robot.root_link
     body_pose = body.get_position_orientation()
-    world_frame_to_body_frame = p.invertTransform(*body_pose)
+    world_frame_to_body_frame = T.invert_pose_transform(*body_pose)
 
     # Accumulate the actions in the correct order.
     action = np.zeros(robot.action_dim)
@@ -112,42 +124,62 @@ def convert_behavior_robot_part_pose_to_action(
 
     # Compute the needed body motion
     if body_target_pose is not None:
-        part_close["body"] = is_close(([0, 0, 0], [0, 0, 0, 1]), body_target_pose, dist_threshold, angle_threshold)
-        action[robot.controller_action_idx["base"]] = pose_to_command(robot, robot.base_name, body_target_pose)
+        is_angle_close, is_dist_close = is_close(([0, 0, 0], [0, 0, 0, 1]), body_target_pose, dist_threshold, angle_threshold)
+        part_close["body"] = is_angle_close and is_dist_close
+
+        angle_to_waypoint = T.vecs2axisangle([1, 0, 0], [body_target_pose[0][0], body_target_pose[0][1], 0.0])[2]
+        # angle_to_waypoint = T.vecs2axisangle([1, 0, 0], [body_target_pose[0][0], body_target_pose[0][1], 0.0])[2]
+        # command = pose_to_command(robot, robot.root_link_name, body_target_pose)
+        lin_vel = 0.0
+        ang_vel = 0.0
+        if is_dist_close:
+            ang_vel = 0.1
+        else:
+            if abs(angle_to_waypoint) > DEFAULT_ANGLE_THRESHOLD:
+                ang_vel = -0.1 if angle_to_waypoint < 0 else 0.1
+            else:
+                lin_vel = 0.4
+
+        base_action = [lin_vel, ang_vel]
+        action[robot.controller_action_idx["base"]] = base_action
 
     # Keep a list of parts we'll move to default positions later. This is in correct order.
-    parts_to_move_to_default_pos = [
-        ("eye", "camera", "neck", behavior_robot.EYE_LOC_POSE_TRACKED),
-        ("left_hand", "arm_left_hand", "left_hand_shoulder", behavior_robot.LEFT_HAND_LOC_POSE_TRACKED),
-    ]
+    # parts_to_move_to_default_pos = [
+    #     ("eye", "camera", "neck", behavior_robot.EYE_LOC_POSE_TRACKED),
+    #     ("left_hand", "arm_left_hand", "left_hand_shoulder", behavior_robot.LEFT_HAND_LOC_POSE_TRACKED),
+    # ]
 
-    # Take care of the right hand now.
-    if hand_target_pose is not None:
-        # Compute the needed right hand action
-        right_hand = robot.eef_links["right_hand"]
-        right_hand_pose_in_body_frame = p.multiplyTransforms(
-            *world_frame_to_body_frame, *right_hand.get_position_orientation()
-        )
-        part_close["right_hand"] = is_close(
-            right_hand_pose_in_body_frame, hand_target_pose, dist_threshold, angle_threshold
-        )
-        action[robot.controller_action_idx["arm_right_hand"]] = pose_to_command(
-            robot, "right_hand_shoulder", hand_target_pose
-        )
-    else:
-        # Move it back to the default position in with the below logic.
-        parts_to_move_to_default_pos.append(
-            ("right_hand", "arm_right_hand", "right_hand_shoulder", behavior_robot.RIGHT_HAND_LOC_POSE_TRACKED)
-        )
+    # # Take care of the right hand now.
+    # if hand_target_pose is not None:
+    #     # Compute the needed right hand action
+
+    #     robot_arm_ik_solver = robot._controllers["arm_0"].solver
+
+    #     right_hand = robot.eef_links["right_hand"]
+    #     right_hand_pose_in_body_frame = p.multiplyTransforms(
+    #         *world_frame_to_body_frame, *right_hand.get_position_orientation()
+    #     )
+    #     part_close["right_hand"] = is_close(
+    #         right_hand_pose_in_body_frame, hand_target_pose, dist_threshold, angle_threshold
+    #     )
+    #     action[robot.controller_action_idx["arm_right_hand"]] = pose_to_command(
+    #         robot, "right_hand_shoulder", hand_target_pose
+    #     )
+
+    # else:
+    #     # Move it back to the default position in with the below logic.
+    #     parts_to_move_to_default_pos.append(
+    #         ("right_hand", "arm_right_hand", "right_hand_shoulder", behavior_robot.RIGHT_HAND_LOC_POSE_TRACKED)
+    #     )
 
     # Move other parts to default positions.
-    if reset_others:
-        for part_name, controller_name, shoulder_name, target_pose in parts_to_move_to_default_pos:
-            part = robot.eef_links[part_name] if part_name != "eye" else robot.links["eyes"]
-            part_pose_in_body_frame = p.multiplyTransforms(*world_frame_to_body_frame, *part.get_position_orientation())
+    # if reset_others:
+    #     for part_name, controller_name, shoulder_name, target_pose in parts_to_move_to_default_pos:
+    #         part = robot.eef_links[part_name] if part_name != "eye" else robot.links["eyes"]
+    #         part_pose_in_body_frame = p.multiplyTransforms(*world_frame_to_body_frame, *part.get_position_orientation())
 
-            part_close[part_name] = is_close(part_pose_in_body_frame, target_pose, dist_threshold, angle_threshold)
-            action[robot.controller_action_idx[controller_name]] = pose_to_command(robot, shoulder_name, target_pose)
+    #         part_close[part_name] = is_close(part_pose_in_body_frame, target_pose, dist_threshold, angle_threshold)
+    #         action[robot.controller_action_idx[controller_name]] = pose_to_command(robot, shoulder_name, target_pose)
 
     indented_print("Part closeness: %s", part_close)
 
@@ -159,17 +191,25 @@ def convert_behavior_robot_part_pose_to_action(
 
 
 class UndoableContext(object):
-    def __init__(self, robot: BehaviorRobot):
-        self.robot = robot
+    def __init__(self):
+        pass
 
     def __enter__(self):
-        self.robot_data = self.robot.dump_state()
-        self.state = p.saveState()
+        self.state = og.sim.dump_state(serialized=False)
+        og.sim._physics_context.set_gravity(value=0.0)
+        for obj in og.sim.scene.objects:
+            for link in obj.links.values():
+                PhysxSchema.PhysxRigidBodyAPI(link.prim).GetSolveContactAttr().Set(False)
+            obj.keep_still()
 
     def __exit__(self, *args):
-        self.robot.load_state(self.robot_data)
-        restoreState(self.state)
-        p.removeState(self.state)
+        og.sim.load_state(self.state, serialized=False)
+
+        og.sim._physics_context.set_gravity(value=-9.81)
+        for obj in og.sim.scene.objects:
+            for link in obj.links.values():
+                PhysxSchema.PhysxRigidBodyAPI(link.prim).GetSolveContactAttr().Set(True)
+
 
 
 class StarterSemanticActionPrimitive(IntEnum):
@@ -497,7 +537,7 @@ class StarterSemanticActionPrimitives(BaseActionPrimitiveSet):
             if stop_on_contact and p.getContactPoints(self.robot.eef_links[self.arm].body_id):  # TODO(MP): Generalize
                 return
 
-            action = convert_behavior_robot_part_pose_to_action(self.robot, hand_target_pose=relative_target_pose)
+            action = convert_robot_part_pose_to_action(self.robot, hand_target_pose=relative_target_pose)
             if action is None:
                 if stop_on_contact:
                     raise ActionPrimitiveError(
@@ -580,14 +620,13 @@ class StarterSemanticActionPrimitives(BaseActionPrimitiveSet):
 
                 return random_point[0], random_point[1], np.random.uniform(-np.pi, np.pi)
 
-        with UndoableContext(self.robot):
+        with UndoableContext():
             # Note that the plan returned by this planner only contains xy pairs & not yaw.
             plan = plan_base_motion_br(
                 robot=self.robot,
-                obj_in_hand=self._get_obj_in_hand(),
+                obj_in_hand=None,
                 end_conf=pose_2d,
                 sample_fn=sample_fn,
-                obstacles=self._get_collision_body_ids(),
             )
 
         if plan is None:
@@ -608,7 +647,7 @@ class StarterSemanticActionPrimitives(BaseActionPrimitiveSet):
         cur_pos = self.robot.get_position()
         target_pose = self._get_robot_pose_from_2d_pose((cur_pos[0], cur_pos[1], yaw))
         for _ in range(MAX_STEPS_FOR_WAYPOINT_NAVIGATION):
-            action = convert_behavior_robot_part_pose_to_action(
+            action = convert_robot_part_pose_to_action(
                 self.robot, body_target_pose=self._get_pose_in_robot_frame(target_pose), low_precision=low_precision
             )
             if action is None:
@@ -642,8 +681,8 @@ class StarterSemanticActionPrimitives(BaseActionPrimitiveSet):
 
         # Keep the same orientation until the target.
         pose = self._get_robot_pose_from_2d_pose(pose_2d)
-        for _ in range(MAX_STEPS_FOR_WAYPOINT_NAVIGATION):
-            action = convert_behavior_robot_part_pose_to_action(
+        while True:
+            action = convert_robot_part_pose_to_action(
                 self.robot, body_target_pose=self._get_pose_in_robot_frame(pose), low_precision=low_precision
             )
             if action is None:
@@ -800,13 +839,13 @@ class StarterSemanticActionPrimitives(BaseActionPrimitiveSet):
     @staticmethod
     def _get_robot_pose_from_2d_pose(pose_2d):
         pos = np.array([pose_2d[0], pose_2d[1], DEFAULT_BODY_OFFSET_FROM_FLOOR])
-        orn = p.getQuaternionFromEuler([0, 0, pose_2d[2]])
+        orn = T.euler2quat([0, 0, pose_2d[2]])
         return pos, orn
 
     def _get_pose_in_robot_frame(self, pose):
         body_pose = self.robot.get_position_orientation()
-        world_to_body_frame = p.invertTransform(*body_pose)
-        relative_target_pose = p.multiplyTransforms(*world_to_body_frame, *pose)
+        world_to_body_frame = T.invert_pose_transform(*body_pose)
+        relative_target_pose = T.pose_transform(*world_to_body_frame, *pose)
         return relative_target_pose
 
     def _get_collision_body_ids(self, include_robot=False):

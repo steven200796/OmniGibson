@@ -4,9 +4,9 @@ from enum import IntEnum
 
 from future.utils import with_metaclass
 
-from igibson.robots import BaseRobot
-from igibson.scenes.igibson_indoor_scene import InteractiveIndoorScene
-from igibson.tasks.task_base import BaseTask
+from omnigibson.robots import BaseRobot
+from omnigibson.scenes.interactive_traversable_scene import InteractiveTraversableScene
+from omnigibson.tasks.task_base import BaseTask
 
 REGISTERED_PRIMITIVE_SETS = {}
 
@@ -46,7 +46,7 @@ class BaseActionPrimitiveSet(with_metaclass(ABCMeta, object)):
 
     def __init__(self, task, scene, robot):
         self.task: BaseTask = task
-        self.scene: InteractiveIndoorScene = scene
+        self.scene: InteractiveTraversableScene = scene
         self.robot: BaseRobot = robot
 
     @abstractmethod
