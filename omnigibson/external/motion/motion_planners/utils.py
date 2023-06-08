@@ -10,7 +10,7 @@ INF = float('inf')
 
 RRT_ITERATIONS = 20
 RRT_RESTARTS = 2
-RRT_SMOOTHING = 20
+RRT_SMOOTHING = 200
 
 
 def irange(start, stop=None, step=1):  # np.arange

@@ -34,7 +34,7 @@ def plan_base_motion_br(
     max_distance=BODY_MAX_DISTANCE,
     iterations=100,
     restarts=2,
-    shortening=0,
+    shortening=200,
     **kwargs,
 ):
     distance_fn = lambda q1, q2: np.linalg.norm(np.array(q2[:2]) - np.array(q1[:2]))
@@ -42,7 +42,6 @@ def plan_base_motion_br(
     def slippery_extender(q1, q2):
         aq1 = np.array(q1[:2])
         aq2 = np.array(q2[:2])
-        print(aq1, aq2)
         diff = aq2 - aq1
         start_yaw = q1[2]
         end_yaw = q2[2]
@@ -60,33 +59,17 @@ def plan_base_motion_br(
 
     extend_fn = slippery_extender
 
-    # remove object in hand before checking for collisions
-
     def collision_fn(q):
         robot.set_position_orientation(
             [q[0], q[1], 0.05], T.euler2quat((0, 0, q[2]))
         )
+        og.sim.step(render=False)
+        # filter_objects = ["floor"]
+        # if obj_in_hand is not None:
+        #     filter_objects.append(obj_in_hand.name)
         collision_objects = list(filter(lambda obj : "floor" not in obj.name, robot.states[ContactBodies].get_value()))
-        
-        trav_map = og.sim.scene._trav_map
-        # The below code is useful for plotting the RRT tree.
-        SEARCHED.append(np.flip(trav_map.world_to_map((q[0], q[1]))))
-        
-        fig = plt.figure()
-        plt.imshow(trav_map.floor_map[0])
-        plt.scatter(*zip(*SEARCHED), 5)
-        fig.canvas.draw()
-        
-        # Convert the canvas to image
-        img = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep="")
-        img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-        plt.close(fig)
-        
-        # Convert to BGR for cv2-based viewing.
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        
-        cv2.imshow("SceneGraph", img)
-        cv2.waitKey(1)
+        # collision_objects = robot.states[ContactBodies].get_value()
+        # for col_obj in collision_objects:
 
         return len(collision_objects) > 0
 
@@ -113,7 +96,17 @@ def plan_base_motion_br(
     )
     if path is None:
         return None
-    return shorten_path(path, extend_fn, collision_fn, shortening)
+    
+    path = shorten_path(path, extend_fn, collision_fn, shortening)
+    # Remove unnecessary rotations in the plan
+    for start_idx in range(len(path) - 1):
+        start = np.array(path[start_idx][:2])
+        end = np.array(path[start_idx + 1][:2])
+        segment = end - start
+        theta = np.arctan2(segment[1], segment[0])
+        path[start_idx] = (start[0], start[1], theta)
+    
+    return path
 
 
 def hand_difference_fn(q2, q1):

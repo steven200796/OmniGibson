@@ -592,12 +592,6 @@ def pose_inv(pose_mat):
     pose_inv[3, 3] = 1.0
     return pose_inv
 
-def invert_pose_transform(pos, quat):
-
-    mat = pose2mat((pos, quat))
-    mat_inv = pose_inv(mat)
-    return mat2pose(mat_inv)
-
 def pose_transform(pos1, quat1, pos0, quat0):
     """
     Conducts forward transform from pose (pos0, quat0) to pose (pos1, quat1):

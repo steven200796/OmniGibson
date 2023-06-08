@@ -10,6 +10,8 @@ import logging
 import random
 from enum import IntEnum
 from math import ceil
+import cv2
+from matplotlib import pyplot as plt
 
 import gym
 import numpy as np
@@ -21,7 +23,7 @@ from omnigibson import object_states
 from omnigibson.action_primitives.action_primitive_set_base import ActionPrimitiveError, BaseActionPrimitiveSet
 # from igibson.external.pybullet_tools.utils import set_joint_position
 # from igibson.object_states.on_floor import RoomFloor
-# from igibson.object_states.utils import get_center_extent, sample_kinematics
+from omnigibson.object_states.utils import get_center_extent, sample_kinematics
 # from igibson.objects.articulated_object import URDFObject
 from omnigibson.objects.object_base import BaseObject
 # from igibson.robots import BaseRobot, behavior_robot
@@ -53,6 +55,8 @@ get_grasp_poses_for_object = None
 get_grasp_position_for_open = None
 restoreState = None
 
+KP_LIN_VEL = 0.4
+KP_ANGLE_VEL = 0.2
 
 MAX_STEPS_FOR_HAND_MOVE = 100
 MAX_STEPS_FOR_HAND_MOVE_WHEN_OPENING = 30
@@ -101,19 +105,16 @@ def is_close(start_pose, end_pose, angle_threshold, dist_threshold):
     indented_print(
         "Position difference to target: %s, Rotation difference: %s", np.linalg.norm(diff_pos), diff_rot.magnitude()
     )
-
-    return diff_rot.magnitude() < angle_threshold, np.linalg.norm(diff_pos) < dist_threshold
+    return diff_rot.magnitude() < angle_threshold, np.linalg.norm(diff_pos) < dist_threshold, diff_rot.as_euler('xyz')[2], np.linalg.norm(diff_pos)
 
 
 def convert_robot_part_pose_to_action(
     robot, body_target_pose=None, hand_target_pose=None, reset_others=True, low_precision=False
 ):
     assert body_target_pose is not None or hand_target_pose is not None
-
     # Compute the body information from the current frame.
     body = robot.root_link
     body_pose = body.get_position_orientation()
-    world_frame_to_body_frame = T.invert_pose_transform(*body_pose)
 
     # Accumulate the actions in the correct order.
     action = np.zeros(robot.action_dim)
@@ -132,13 +133,17 @@ def convert_robot_part_pose_to_action(
         # command = pose_to_command(robot, robot.root_link_name, body_target_pose)
         lin_vel = 0.0
         ang_vel = 0.0
+        
         if is_dist_close:
             ang_vel = 0.1
+            print("arrived")
         else:
             if abs(angle_to_waypoint) > DEFAULT_ANGLE_THRESHOLD:
                 ang_vel = -0.1 if angle_to_waypoint < 0 else 0.1
+                print("turning")
             else:
                 lin_vel = 0.4
+                print("forward")
 
         base_action = [lin_vel, ang_vel]
         action[robot.controller_action_idx["base"]] = base_action
@@ -621,7 +626,6 @@ class StarterSemanticActionPrimitives(BaseActionPrimitiveSet):
                 return random_point[0], random_point[1], np.random.uniform(-np.pi, np.pi)
 
         with UndoableContext():
-            # Note that the plan returned by this planner only contains xy pairs & not yaw.
             plan = plan_base_motion_br(
                 robot=self.robot,
                 obj_in_hand=None,
@@ -633,6 +637,7 @@ class StarterSemanticActionPrimitives(BaseActionPrimitiveSet):
             # TODO: Would be great to produce a more informative error.
             raise ActionPrimitiveError(ActionPrimitiveError.Reason.PLANNING_ERROR, "Could not make a navigation plan.")
 
+        self.draw_plan(plan)
         # Follow the plan to navigate.
         indented_print("Plan has %d steps.", len(plan))
         for i, pose_2d in enumerate(plan):
@@ -642,6 +647,29 @@ class StarterSemanticActionPrimitives(BaseActionPrimitiveSet):
 
         # Match the final desired yaw.
         # yield from self._rotate_in_place(pose_2d[2])
+
+    def draw_plan(self, plan):
+        SEARCHED = []
+        trav_map = og.sim.scene._trav_map
+        for q in plan:
+            # The below code is useful for plotting the RRT tree.
+            SEARCHED.append(np.flip(trav_map.world_to_map((q[0], q[1]))))
+            
+            fig = plt.figure()
+            plt.imshow(trav_map.floor_map[0])
+            plt.scatter(*zip(*SEARCHED), 5)
+            fig.canvas.draw()
+            
+            # Convert the canvas to image
+            img = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep="")
+            img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+            plt.close(fig)
+            
+            # Convert to BGR for cv2-based viewing.
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            
+            cv2.imshow("SceneGraph", img)
+            cv2.waitKey(1)
 
     def _rotate_in_place(self, yaw, low_precision=False):
         cur_pos = self.robot.get_position()
@@ -681,13 +709,46 @@ class StarterSemanticActionPrimitives(BaseActionPrimitiveSet):
 
         # Keep the same orientation until the target.
         pose = self._get_robot_pose_from_2d_pose(pose_2d)
+
+        dist_threshold = LOW_PRECISION_DIST_THRESHOLD if low_precision else DEFAULT_DIST_THRESHOLD
+        angle_threshold = LOW_PRECISION_ANGLE_THRESHOLD if low_precision else DEFAULT_ANGLE_THRESHOLD
+        arrived_at_pos = False
         while True:
-            action = convert_robot_part_pose_to_action(
-                self.robot, body_target_pose=self._get_pose_in_robot_frame(pose), low_precision=low_precision
-            )
-            if action is None:
+            body_target_pose = self._get_pose_in_robot_frame(pose)
+
+            # Accumulate the actions in the correct order.
+            action = np.zeros(self.robot.action_dim)
+
+            is_angle_close, is_dist_close, angle, dist = is_close(([0, 0, 0], [0, 0, 0, 1]), body_target_pose, dist_threshold, angle_threshold)
+            if is_dist_close: arrived_at_pos = True
+
+            angle_to_waypoint = T.vecs2axisangle([1, 0, 0], [body_target_pose[0][0], body_target_pose[0][1], 0.0])[2]
+            angle_to_target_pose = T.quat2euler(body_target_pose[1])[2]
+
+            lin_vel = 0.0
+            ang_vel = 0.0
+            
+            if arrived_at_pos:
+                direction = -1.0 if angle < 0.0 else 1.0
+                ang_vel = KP_ANGLE_VEL * abs(angle) * direction
+                ang_vel = 0.2 * direction
+            else:
+                if abs(angle_to_waypoint) > DEFAULT_ANGLE_THRESHOLD:
+                    direction = -1.0 if angle_to_waypoint < 0 else 1.0
+                    ang_vel = KP_ANGLE_VEL * abs(angle_to_waypoint) * direction
+                    ang_vel = 0.2 * direction
+                else:
+                    lin_vel = KP_LIN_VEL * dist
+                    lin_vel = 0.3
+
+            base_action = [lin_vel, ang_vel]
+            action[self.robot.controller_action_idx["base"]] = base_action
+
+            # print(is_angle_close)
+            # Return None if no action is needed.
+            if is_angle_close and arrived_at_pos:
                 indented_print("Move is complete.")
-                return
+                return None
 
             yield action
 
@@ -844,9 +905,7 @@ class StarterSemanticActionPrimitives(BaseActionPrimitiveSet):
 
     def _get_pose_in_robot_frame(self, pose):
         body_pose = self.robot.get_position_orientation()
-        world_to_body_frame = T.invert_pose_transform(*body_pose)
-        relative_target_pose = T.pose_transform(*world_to_body_frame, *pose)
-        return relative_target_pose
+        return T.relative_pose_transform(*pose, *body_pose)
 
     def _get_collision_body_ids(self, include_robot=False):
         ids = []

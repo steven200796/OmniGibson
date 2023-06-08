@@ -8,6 +8,7 @@ import numpy as np
 
 def smooth_path(path, extend, collision, iterations=50):
     smoothed_path = path
+    print("iterations: ", iterations)
     for _ in range(iterations):
         if len(smoothed_path) <= 2:
             return smoothed_path
